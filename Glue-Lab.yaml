@@ -1,0 +1,152 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+Outputs:
+  
+  GlueLabRole:
+    Description: The Glue service role
+    Value: !Ref GlueLabRole
+  BucketName:
+    Description: S3 Bucket that was created
+    Value: !Ref DMSLabS3Bucket
+  
+Resources:
+  
+  DMSLabS3Bucket:
+    Type: AWS::S3::Bucket
+  DMSLabS3Policy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: DMSLabS3Policy
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+              - s3:DeleteObject
+            Resource:
+              - !Sub ${DMSLabS3Bucket.Arn}/*
+          -
+            Effect: Allow
+            Action:
+              - s3:ListBucket
+            Resource:
+              - !GetAtt DMSLabS3Bucket.Arn
+      Roles:
+        - !Ref GlueLabRole
+  GlueLabRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service:
+                - glue.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /service-role/
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+        - arn:aws:iam::aws:policy/AmazonKinesisFullAccess
+      Policies:
+        -
+          PolicyName: DEBucketAccess
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              -
+                Sid: ListDEBucket
+                Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource: arn:aws:s3:::aws-dataengineering-day.workshop.aws
+              -
+                Sid: GetObjectFromDEBucket
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: arn:aws:s3:::aws-dataengineering-day.workshop.aws/*  
+  
+
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+      Policies:
+        - PolicyName: LambdaRolePolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: s3:DeleteObject
+                Resource:
+                  - !Sub arn:aws:s3:::${DMSLabS3Bucket}/*
+                
+              - Effect: Allow
+                Action: s3:ListBucket
+                Resource:
+                  - !Sub arn:aws:s3:::${DMSLabS3Bucket}
+ 
+              - Effect: Allow
+                Action: logs:CreateLogGroup
+                Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream 
+                  - logs:PutLogEvents
+                Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:*
+  S3BucketHandler:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Role: !GetAtt LambdaRole.Arn
+      Code:
+        ZipFile: |
+          import os
+          import json
+          import cfnresponse
+          import boto3
+          from botocore.exceptions import ClientError
+
+          s3 = boto3.resource('s3')
+
+
+          def handler(event, context):
+              print("Received event: %s" % json.dumps(event))
+              s3_bucket = s3.Bucket(event['ResourceProperties']['Bucket'])
+
+              try:
+                  if event['RequestType'] == 'Create' or event['RequestType'] == 'Update':
+                      result = cfnresponse.SUCCESS
+                  elif event['RequestType'] == 'Delete':
+                      s3_bucket.objects.delete()
+                      result = cfnresponse.SUCCESS
+              except ClientError as e:
+                  print('Error: %s', e)
+                  result = cfnresponse.FAILED
+
+              cfnresponse.send(event, context, result, {})
+
+      Runtime: python3.8
+      Timeout: 300
+
+  EmptyDMSLabS3Bucket:
+    Type: "Custom::EmptyS3Bucket"
+    Properties:
+      ServiceToken: !GetAtt S3BucketHandler.Arn
+      Bucket: !Ref DMSLabS3Bucket
